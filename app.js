@@ -2,6 +2,7 @@
   var APIS = ["/.netlify/functions/baza", "/api/baza"];
   var UPLOADS = ["/.netlify/functions/upload", "/api/upload"];
   var LS = "vx-baza-jobs";
+  var LS_DEL = "vx-baza-deleted";
   var MONTHS = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
   function $(id) { return document.getElementById(id); }
   var currentFiles = [];
@@ -9,7 +10,9 @@
   var editId = null;
   var hideList = false;
   var JOBS = [];
+  var DELETED = [];
   var saving = false;
+  var skipCloudUntil = 0;
   var TYPES = ["Частник","Бюро","Застройщик","Дизайнер","Другое"];
   var CATS = ["Экстерьер","Интерьер","Посёлок / территория","Склад / цех","Чертежи / проект","Другое"];
 
@@ -25,6 +28,44 @@
     } catch (e) {
       return [];
     }
+  }
+  function uniqueIds(ids) {
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < (ids || []).length; i++) {
+      var id = String(ids[i] || "");
+      if (!id || seen[id]) continue;
+      seen[id] = true;
+      out.push(id);
+    }
+    return out;
+  }
+  function readDeleted() {
+    try {
+      var raw = localStorage.getItem(LS_DEL);
+      var arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? uniqueIds(arr) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+  function persistDeleted(ids) {
+    DELETED = uniqueIds(ids).slice(-800);
+    try { localStorage.setItem(LS_DEL, JSON.stringify(DELETED)); } catch (e) {}
+  }
+  function rememberDeleted(ids) {
+    persistDeleted(DELETED.concat(readDeleted(), ids || []));
+  }
+  function withoutDeleted(arr, deleted) {
+    var skip = {};
+    var list = deleted || DELETED;
+    for (var i = 0; i < list.length; i++) skip[list[i]] = true;
+    var out = [];
+    for (var k = 0; k < (arr || []).length; k++) {
+      var j = arr[k];
+      if (j && j.id && !skip[j.id]) out.push(j);
+    }
+    return out;
   }
   function slimFiles(files) {
     var out = [];
@@ -60,7 +101,7 @@
     return out;
   }
   async function saveRemote(arr) {
-    var body = JSON.stringify({ jobs: slimJobs(arr) });
+    var body = JSON.stringify({ jobs: slimJobs(arr), deleted: DELETED });
     if (body.length > 450000) throw new Error("size");
     var last = null;
     for (var i = 0; i < APIS.length; i++) {
@@ -79,9 +120,15 @@
     throw last || new Error("network");
   }
   async function saveAll(arr) {
-    JOBS = slimJobs(arr);
-    persistLocal(JOBS);
-    await saveRemote(JOBS);
+    saving = true;
+    try {
+      JOBS = slimJobs(withoutDeleted(arr, DELETED));
+      persistLocal(JOBS);
+      persistDeleted(DELETED);
+      await saveRemote(JOBS);
+    } finally {
+      saving = false;
+    }
   }
   async function pullRemote() {
     var reads = APIS.concat(["https://json.extendsclass.com/bin/baabbfe"]);
@@ -91,7 +138,12 @@
         var r = await fetch(url);
         if (!r.ok) continue;
         var d = await r.json();
-        if (d && Array.isArray(d.jobs)) return d.jobs;
+        if (d && Array.isArray(d.jobs)) {
+          return {
+            jobs: d.jobs,
+            deleted: Array.isArray(d.deleted) ? d.deleted : []
+          };
+        }
       } catch (e) {}
     }
     return null;
@@ -115,20 +167,23 @@
     return out;
   }
   async function pull() {
+    DELETED = readDeleted();
     var remote = await pullRemote();
     var local = readLocal();
-    JOBS = slimJobs(mergeJobs(remote, local));
+    rememberDeleted(remote && remote.deleted);
+    JOBS = slimJobs(withoutDeleted(mergeJobs(remote && remote.jobs, local), DELETED));
     persistLocal(JOBS);
     try {
       if (await migrateEmbedded(JOBS)) await saveAll(JOBS);
-      else if (JOBS.length && (!remote || remote.length < JOBS.length)) await saveRemote(JOBS);
+      else if (!remote || !remote.jobs) await saveRemote(JOBS);
     } catch (e) {}
   }
   async function refreshFromCloud() {
-    if (saving || editId) return;
+    if (saving || editId || Date.now() < skipCloudUntil) return;
     var remote = await pullRemote();
     if (!remote) return;
-    JOBS = slimJobs(mergeJobs(remote, JOBS.length ? JOBS : readLocal()));
+    rememberDeleted(remote.deleted);
+    JOBS = slimJobs(withoutDeleted(mergeJobs(remote.jobs, JOBS.length ? JOBS : readLocal()), DELETED));
     persistLocal(JOBS);
     render();
   }
@@ -244,6 +299,8 @@
     var files = [];
     for (var i = 0; i < list.length; i++) files.push(list[i]);
     if (!files.length) return targetArr;
+    skipCloudUntil = Date.now() + 15000;
+    if ($("saveBtn")) { $("saveBtn").disabled = true; $("saveBtn").textContent = "Загрузка файла..."; }
     for (var k = 0; k < files.length; k++) {
       setFileStatus("Загрузка " + (k + 1) + " из " + files.length + "…");
       try {
@@ -260,6 +317,8 @@
       }
     }
     setFileStatus("Можно прикрепить несколько фото и документов к каждой карточке.");
+    if ($("saveBtn")) { $("saveBtn").disabled = false; $("saveBtn").textContent = "Сохранить"; }
+    skipCloudUntil = Date.now() + 4000;
     return targetArr;
   }
   async function migrateEmbedded(arr) {
@@ -509,7 +568,7 @@
   }
 
   $("saveBtn").onclick = async function () {
-    if (saving) return;
+    if (saving || ($("saveBtn") && $("saveBtn").disabled)) return;
     var job = readForm();
     if (!job.name) { alert("Укажите заказчика"); return; }
     if (!job.date) { alert("Укажите дату договорённости"); return; }
@@ -556,7 +615,6 @@
     document.body.classList.remove("view-form", "view-list", "view-rev", "form-mode");
     document.body.classList.add("view-" + v);
     if (v === "form") document.body.classList.add("form-mode");
-    if ($("toolbar")) $("toolbar").classList.remove("open");
   }
 
   function resetHeader() {
@@ -642,8 +700,18 @@
     if (btn) { e.preventDefault(); e.stopPropagation(); }
     var edit = e.target.closest("[data-edit]");
     if (edit) {
-      editId = edit.getAttribute("data-edit");
+      var eid = edit.getAttribute("data-edit");
+      var jobsE = load();
+      var jobE = null;
+      for (var ei = 0; ei < jobsE.length; ei++) if (jobsE[ei].id === eid) jobE = jobsE[ei];
+      if (!jobE) return;
+      loadForm(jobE);
+      editId = null;
+      hideList = false;
+      $("newBtn").classList.remove("on");
+      setView("form");
       render();
+      if ($("name")) $("name").focus();
       return;
     }
     var saveB = e.target.closest("[data-save]");
@@ -687,12 +755,16 @@
     var del = e.target.closest("[data-del]");
     if (del) {
       var id = del.getAttribute("data-del");
+      if (!id) return;
       if (!confirm("Удалить карточку?")) return;
-      var arr = load();
-      var next = [];
-      for (var i = 0; i < arr.length; i++) if (arr[i].id !== id) next.push(arr[i]);
-      try { await saveAll(next); } catch (e3) { alert("Не удалось сохранить."); return; }
+      rememberDeleted([id]);
+      var next = withoutDeleted(load(), DELETED);
+      JOBS = slimJobs(next);
+      persistLocal(JOBS);
+      render();
       if ($("id").value === id) clearForm();
+      try { await saveAll(next); }
+      catch (e3) { alert("Карточка скрыта здесь, но не удалилась в общей базе. Проверьте интернет и нажмите «Удалить» ещё раз."); return; }
       render();
       return;
     }
@@ -763,12 +835,19 @@
     drawFiles();
   };
 
-  $("q").oninput = function () { hideList = false; $("newBtn").classList.remove("on"); setView("list"); render(); };
-  $("year").onchange = function () { hideList = false; $("newBtn").classList.remove("on"); setView("list"); render(); };
-  $("month").onchange = function () { hideList = false; $("newBtn").classList.remove("on"); setView("list"); render(); };
+  function stayInList() {
+    hideList = false;
+    $("newBtn").classList.remove("on");
+    document.body.classList.remove("view-form", "view-rev", "form-mode");
+    document.body.classList.add("view-list");
+    render();
+  }
+  $("q").oninput = stayInList;
+  $("year").onchange = stayInList;
+  $("month").onchange = stayInList;
 
   $("expBtn").onclick = function () {
-    var payload = JSON.stringify({ jobs: load() });
+    var payload = JSON.stringify({ jobs: load(), deleted: DELETED });
     var src = document.documentElement.outerHTML;
     var html = src.replace("</body>", "<script id=\"vxboot\">window.VX_BOOT=" + payload + ";</scr" + "ipt></body>");
     var a = document.createElement("a");
@@ -789,6 +868,7 @@
         var payload = JSON.parse(m[1]);
         if (!payload.jobs) throw new Error("no jobs");
         if (!confirm("Заменить текущие карточки данными из копии?")) return;
+        if (Array.isArray(payload.deleted)) rememberDeleted(payload.deleted);
         saveAll(payload.jobs).then(render).catch(function () { alert("Не удалось сохранить копию в общую базу."); });
       } catch (err) { alert("Это не копия базы VisualX"); }
     };
