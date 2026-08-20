@@ -1,0 +1,23 @@
+[build]
+  publish = "."
+
+[functions]
+  directory = "netlify/functions"
+
+[[redirects]]
+  from = "/api/baza"
+  to = "/.netlify/functions/baza"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/upload"
+  to = "/.netlify/functions/upload"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/file"
+  to = "/.netlify/functions/file"
+  status = 200
+  force = true

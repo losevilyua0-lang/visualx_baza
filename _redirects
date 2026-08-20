@@ -1,0 +1,3 @@
+/api/baza    /.netlify/functions/baza    200
+/api/upload  /.netlify/functions/upload  200
+/api/file    /.netlify/functions/file    200
