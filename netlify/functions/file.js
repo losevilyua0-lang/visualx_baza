@@ -1,46 +1,47 @@
-function ctx(event) {
-  function parse(raw) {
-    if (!raw) return null;
-    try {
-      var txt = String(raw);
-      try { txt = Buffer.from(String(raw), "base64").toString("utf8"); } catch (e) {}
-      var obj = JSON.parse(txt);
-      if (obj && obj.token && obj.siteID) return obj;
-    } catch (e) {}
-    return null;
-  }
-  return parse(event && event.blobs) || parse(process.env.NETLIFY_BLOBS_CONTEXT);
+function parseCtx(raw) {
+  if (!raw) return null;
+  try {
+    var txt = String(raw);
+    try { txt = Buffer.from(String(raw), "base64").toString("utf8"); } catch (e) {}
+    var obj = JSON.parse(txt);
+    if (obj && (obj.token || obj.deployID) && (obj.siteID || obj.url || obj.edgeURL)) return obj;
+  } catch (e) {}
+  return null;
 }
 
-function urlFor(c, store, key) {
-  var enc = encodeURIComponent(key);
-  if (c.edgeURL) return String(c.edgeURL).replace(/\/$/, "") + "/" + c.siteID + "/" + store + "/" + enc;
-  var api = String(c.apiURL || "https://api.netlify.com").replace(/\/$/, "");
-  if (api.indexOf("/blobs") !== -1) return api + "/" + c.siteID + "/" + store + "/" + enc;
-  return api + "/api/v1/blobs/" + c.siteID + "/" + store + "/" + enc;
+function openStore(event) {
+  var blobs;
+  try { blobs = require("@netlify/blobs"); } catch (e) {
+    throw new Error("package");
+  }
+  try { if (blobs.connectLambda) blobs.connectLambda(event); } catch (e) {}
+  try { return blobs.getStore("vxfiles"); } catch (e) {}
+  var c = parseCtx(event && event.blobs) || parseCtx(process.env.NETLIFY_BLOBS_CONTEXT);
+  if (c && blobs.getStore) {
+    try {
+      return blobs.getStore({
+        name: "vxfiles",
+        siteID: c.siteID,
+        token: c.token,
+        edgeURL: c.edgeURL || c.url
+      });
+    } catch (e2) {}
+  }
+  throw new Error("no blobs context");
 }
 
 exports.handler = async function (event) {
   var headers = { "Access-Control-Allow-Origin": "*" };
   try {
     var id = ((event.queryStringParameters || {}).id || "").trim();
-    if (!id) return { statusCode: 400, headers, body: "missing" };
-    var c = ctx(event);
-    if (!c) return { statusCode: 500, headers, body: "no blobs context" };
-    var r = await fetch(urlFor(c, "vxfiles", id), {
-      method: "GET",
-      headers: { Authorization: "Bearer " + c.token }
-    });
-    if (r.status === 404) return { statusCode: 404, headers, body: "not found" };
-    if (!r.ok) return { statusCode: 500, headers, body: "blob " + r.status };
-    var buf = Buffer.from(await r.arrayBuffer());
-    var meta = {};
-    var rawMeta = r.headers.get("netlify-blobs-metadata");
-    if (rawMeta) {
-      try { meta = JSON.parse(Buffer.from(rawMeta, "base64").toString("utf8")); } catch (e) {}
-    }
+    if (!id) return { statusCode: 400, headers: headers, body: "missing" };
+    var store = openStore(event);
+    var entry = await store.getWithMetadata(id, { type: "arrayBuffer" });
+    if (!entry || entry.data == null) return { statusCode: 404, headers: headers, body: "not found" };
+    var meta = entry.metadata || {};
     var type = meta.type || "application/octet-stream";
     var name = String(meta.name || "file").replace(/"/g, "");
+    var buf = Buffer.from(entry.data);
     return {
       statusCode: 200,
       headers: {
@@ -53,6 +54,6 @@ exports.handler = async function (event) {
       isBase64Encoded: true
     };
   } catch (e) {
-    return { statusCode: 500, headers, body: String(e && e.message || e) };
+    return { statusCode: 500, headers: headers, body: String(e && e.message || e) };
   }
 };

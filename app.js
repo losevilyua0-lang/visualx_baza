@@ -151,8 +151,9 @@
   async function postUpload(url, headers, body) {
     var r = await fetch(url, { method: "POST", headers: headers, body: body });
     if (r.status === 413) throw new Error("too-big");
-    if (!r.ok) throw new Error("upload " + r.status);
-    var d = await r.json();
+    var d = null;
+    try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error((d && d.error) ? String(d.error) : ("upload " + r.status));
     if (!d || !d.url) throw new Error("upload");
     return d;
   }
@@ -254,7 +255,7 @@
         if (err && err.message === "too-big") {
           alert("Файл «" + files[k].name + "» слишком большой для загрузки.");
         } else {
-          alert("Не удалось загрузить «" + files[k].name + "». Облачные функции сайта не отвечают. Залейте архив VisualX_Baza_cloud.zip на Netlify целиком (с папкой netlify/functions).");
+          alert("Не удалось загрузить «" + files[k].name + "». " + ((err && err.message) ? err.message : "Попробуйте ещё раз или выберите файл поменьше."));
         }
       }
     }
