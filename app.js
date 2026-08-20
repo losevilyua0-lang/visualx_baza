@@ -96,26 +96,39 @@
     }
     return null;
   }
+  function mergeJobs(a, b) {
+    var map = {};
+    function score(j) {
+      return JSON.stringify(j || {}).length + ((j && j.files && j.files.length) ? 1000 : 0);
+    }
+    function add(list) {
+      for (var i = 0; i < (list || []).length; i++) {
+        var j = list[i];
+        if (!j || !j.id || j.id === "ping" || j.name === "ping") continue;
+        if (!map[j.id] || score(j) >= score(map[j.id])) map[j.id] = j;
+      }
+    }
+    add(a);
+    add(b);
+    var out = [];
+    for (var k in map) if (Object.prototype.hasOwnProperty.call(map, k)) out.push(map[k]);
+    return out;
+  }
   async function pull() {
     var remote = await pullRemote();
-    JOBS = remote || readLocal();
+    var local = readLocal();
+    JOBS = slimJobs(mergeJobs(remote, local));
+    persistLocal(JOBS);
     try {
-      if (await migrateEmbedded(JOBS)) {
-        await saveAll(JOBS);
-      } else {
-        JOBS = slimJobs(JOBS);
-        persistLocal(JOBS);
-      }
-    } catch (e) {
-      JOBS = slimJobs(JOBS);
-      persistLocal(JOBS);
-    }
+      if (await migrateEmbedded(JOBS)) await saveAll(JOBS);
+      else if (JOBS.length && (!remote || remote.length < JOBS.length)) await saveRemote(JOBS);
+    } catch (e) {}
   }
   async function refreshFromCloud() {
     if (saving || editId) return;
     var remote = await pullRemote();
     if (!remote) return;
-    JOBS = slimJobs(remote);
+    JOBS = slimJobs(mergeJobs(remote, JOBS.length ? JOBS : readLocal()));
     persistLocal(JOBS);
     render();
   }
